@@ -1,0 +1,35 @@
+<?php
+
+namespace App\Imports;
+
+use App\Models\ImportData;
+use Illuminate\Support\Collection;
+use Maatwebsite\Excel\Concerns\FromCollection;
+use Maatwebsite\Excel\Concerns\SkipsEmptyRows;
+use Maatwebsite\Excel\Concerns\ToCollection;
+
+class ProjectImport implements SkipsEmptyRows, FromCollection
+{
+    /**
+     * @param Collection $collection
+     */
+    public function collection()
+    {
+        return ImportData::all();
+    }
+
+    public function rules(): array
+    {
+        return [
+            0 => ['required'],
+        ];
+    }
+
+    public function batchSize(): int{
+        return 5000;
+    }
+    public function chunkSize(): int
+    {
+        return 5000;
+    }
+}

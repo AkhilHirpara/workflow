@@ -1,0 +1,812 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Lang;
+use App\Models\Project;
+use App\Models\Files;
+use App\Models\ImportColumns;
+use App\Models\ImportData;
+use App\Models\ProjectsUsers;
+use App\Models\User;
+use App\Models\Investor;
+use App\Models\Platform;
+use App\Models\Templates;
+use App\Models\Questions;
+// use Maatwebsite\Excel\Facades\Excel;
+use App\Imports\ProjectImport;
+// use Maatwebsite\Excel\HeadingRowImport;
+// use Maatwebsite\Excel\Imports\HeadingRowFormatter;
+use Rap2hpoutre\FastExcel\FastExcel;
+use Illuminate\Support\Facades\Session;
+use Illuminate\Support\Facades\Schema;
+
+use Nikazooz\Simplesheet\HeadingRowImport;
+use Nikazooz\Simplesheet\Imports\HeadingRowFormatter;
+use Nikazooz\Simplesheet\Concerns\Importable;
+use Nikazooz\Simplesheet\Facades\Simplesheet;
+
+
+
+class ProjectController extends Controller
+{
+    //Import xlsx sheet and copy to folder
+    public function importsheet(Request $request)
+    {
+        // $get_rows = array();
+        // while (empty($get_rows)) {
+        //     $find_row = ImportData::where('file_id', 240)->first();
+        //     if (empty($find_row)) {
+        //         sleep(2);
+        //     } else {
+        //         $get_rows = $find_row->toArray();
+        //     }
+        // }
+        // $sheet_headers = array_filter(array_keys(json_decode($get_rows['row_details'], true)));
+
+        $validate_message = array(
+            'projectfile.mimes' => 'Project file type must be a : xlsx',
+        );
+        $validator = Validator::make($request->all(), [
+            'projectfile' => 'required|file|mimes:xlsx',
+            'numberofrows' => 'required|numeric',
+        ], $validate_message);
+        if ($validator->fails()) {
+            return error($validator->errors());
+        }
+
+
+        $check_user = $request->get('current_user');
+
+        $uploaded_file = $request->file('projectfile');
+        $filesize = $uploaded_file->getSize();
+        $file_size_mb = number_format($filesize / 1048576, 2);
+        $filenameWithExt = $uploaded_file->getClientOriginalName();
+        $filename = pathinfo($filenameWithExt, PATHINFO_FILENAME);
+        $extension = $uploaded_file->getClientOriginalExtension();
+        $fileNameToStore = $filename . '_' . time() . '.' . $extension;
+        $movefile = public_path() . env('IMPORT_FILESPATH');
+        $move_file = $uploaded_file->move($movefile, $fileNameToStore);
+        if ($move_file) {
+            $new_filepath = $movefile . $fileNameToStore;
+            $fileurl = env('IMPORT_FILESPATH') . $fileNameToStore;
+            $add_file = Files::create(['filename' => $fileNameToStore, 'type' => 'Import', 'total_rows' => $request->numberofrows,  'import_status' => 2, 'created_by' => $check_user->id]);
+            $sheet_headers = array();
+            HeadingRowFormatter::default('none');
+            $headings = (new HeadingRowImport)->toArray($new_filepath);
+            if (!empty($headings) && !empty($headings[0][0])) {
+                $sheet_headers = $headings[0][0];
+            }
+            $sheet_headers = array_filter($sheet_headers);
+            if (empty($sheet_headers)) {
+                return error(Lang::get('validation.custom.empty_excel_file'));
+            }
+
+            Simplesheet::import(new ProjectImport($add_file, $check_user), $new_filepath);
+
+
+exit;
+            if ($file_size_mb < 10) {
+
+                
+
+                $read_headings = new HeadingRowImport();
+                $headings = $read_headings->toArray($new_filepath);
+                if (!empty($headings) && !empty($headings[0][0])) {
+                    $sheet_headers = $headings[0][0];
+                }
+                $sheet_headers = array_filter($sheet_headers);
+                if (empty($sheet_headers)) {
+                    return error(Lang::get('validation.custom.empty_excel_file'));
+                }
+
+                //Add file to queue for import
+                $data = Excel::import(new ProjectImport($add_file, $check_user), $new_filepath);
+                //Add file to queue for import
+
+                $sheet_headers = array_map(function ($value) {
+                    return str_replace(' ', '_', $value);
+                }, $sheet_headers);
+                $required_cols = array('Account_Reference', 'Current_Balance', 'Delinquency_Flag');
+                $search_array = array_map('strtolower', $sheet_headers);
+                foreach ($required_cols as $recol) {
+                    if (!in_array(strtolower($recol), $search_array)) {
+                        return error(Lang::get('validation.custom.file_missing_reqcols'));
+                    }
+                }
+                $add_all = array();
+                $current_time = currenthumantime();
+                foreach ($sheet_headers as $single_head) {
+                    $add_all[] = ['file_id' => $add_file->id, 'column_heading' => $single_head, 'created_at' => $current_time, 'updated_at' => $current_time];
+                }
+                if (!empty($add_all)) {
+                    $add_many = ImportColumns::insert($add_all);
+                    addlog('Add', 'Project', Lang::get('validation.logs.projectsheetimport_success', ['sheetname' => $fileNameToStore, 'username' => $check_user->username]), $check_user->id);
+                    return success($add_file, Lang::get('validation.custom.file_imported'));
+                } else {
+                    addlog('Add', 'Project', Lang::get('validation.logs.projectsheetimport_failed', ['sheetname' => $fileNameToStore, 'username' => $check_user->username]), $check_user->id);
+                    return error(Lang::get('validation.custom.empty_excel_file'));
+                }
+            } else {
+                //Add file to queue for import
+                $data = Excel::import(new ProjectImport($add_file, $check_user), $new_filepath);
+                //Add file to queue for import
+
+                // $get_rows = array();
+                // while (empty($get_rows)) {
+                //     $find_row = ImportData::where('file_id', $add_file->id)->first();
+                //     if (empty($find_row)) {
+                //         sleep(2);
+                //     } else {
+                //         $get_rows = $find_row->toArray();
+                //     }
+                // }
+                // $sheet_headers = array_filter(array_keys(json_decode($get_rows['row_details'], true)));
+                addlog('Add', 'Project', Lang::get('validation.logs.projectsheetimport_success', ['sheetname' => $fileNameToStore, 'username' => $check_user->username]), $check_user->id);
+                return success($add_file, Lang::get('validation.custom.file_imported'));
+            }
+        } else {
+            addlog('Add', 'Project', Lang::get('validation.logs.projectsheetimport_failed', ['sheetname' => $fileNameToStore, 'username' => $check_user->username]), $check_user->id);
+            return error(Lang::get('validation.custom.file_move_failed', ['filename' => $fileNameToStore]));
+        }
+    }
+
+
+    // Add/Edit project 
+    public function addeditproject(Request $request)
+    {
+        $validate_array = array(
+            'projectid' => 'sometimes|required|numeric|min:1|exists:App\Models\Project,id',
+            'project_name' => 'required|max:255',
+            'identifier' => 'required|max:255',
+            'investor_id' => 'required|numeric|exists:App\Models\Investor,id',
+            'platform_id' => 'required|numeric|exists:App\Models\Platform,id',
+            'fileid' => 'required|numeric|exists:App\Models\Files,id',
+        );
+        $validator = Validator::make($request->all(), $validate_array);
+        if ($validator->fails()) {
+            return error($validator->errors());
+        }
+        $find_file = Files::find($request->fileid);
+        if ($find_file->project_id != '' && !$request->has('projectid')) {
+            return error(Lang::get('validation.custom.file_already_used'));
+        }
+        if ($find_file->project_id != '' && $request->has('projectid') && trim($request->projectid) != '' && $find_file->project_id != $request->projectid) {
+            return error(Lang::get('validation.custom.file_already_used'));
+        }
+
+
+        if ($request->has('projectid') && trim($request->projectid) != '') {
+            $is_exist = Project::where('project_name', $request->project_name)->where('id', '!=', $request->projectid)->first();
+        } else {
+            $is_exist = Project::where('project_name', $request->project_name)->first();
+        }
+        if (empty($is_exist)) {
+            $check_user = $request->get('current_user');
+            if ($request->has('projectid') && trim($request->projectid) != '') {
+                $addeditdata = Project::where('id', $request->projectid)->update(['project_name' => $request->project_name, 'identifier' => $request->identifier, 'investor_id' => $request->investor_id, 'platform_id' => $request->platform_id]);
+                $cur_project = Project::find($request->projectid);
+                addlog('Edit', 'Project', Lang::get('validation.logs.projectdetails_success', ['projectname' => $cur_project->project_name, 'username' => $check_user->username]), $check_user->id);
+                $success_msg =  Lang::get('validation.custom.project_update_success');
+            } else {
+                $addeditdata = Project::create(['project_name' => $request->project_name, 'identifier' => $request->identifier, 'investor_id' => $request->investor_id, 'platform_id' => $request->platform_id, 'percentage_completed' => 0, 'status' => 3, 'last_completed_step' => 2, 'created_by' => $check_user->id]);
+                $cur_project = Project::find($addeditdata->id);
+                addlog('Add', 'Project', Lang::get('validation.logs.projectdetails_success', ['projectname' => $cur_project->project_name, 'username' => $check_user->username]), $check_user->id);
+                $success_msg =  Lang::get('validation.custom.project_add_success');
+            }
+            if (!empty($cur_project)) {
+                $update_files = Files::where('id', $request->fileid)->update(['project_id' => $cur_project->id]);
+                if (!$update_files) {
+                    addlog('Add', 'Project', Lang::get('validation.logs.projectdetails_failed', ['projectname' => $request->project_name, 'username' => $check_user->username]), $check_user->id);
+                    return error(Lang::get('validation.custom.project_add_failed'));
+                }
+                return success($cur_project, $success_msg);
+            } else {
+                addlog('Add', 'Project', Lang::get('validation.logs.projectdetails_failed', ['projectname' => $request->project_name, 'username' => $check_user->username]), $check_user->id);
+                return error(Lang::get('validation.custom.project_add_failed'));
+            }
+        } else {
+            if ($is_exist->status == 0)
+                return error(Lang::get('validation.custom.project_already_deleted'));
+            else
+                return error(Lang::get('validation.custom.project_already_exist'));
+        }
+    }
+
+    //Get sheet headers
+    public function getsheetheaders(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'projectid' => 'required|numeric|exists:App\Models\Project,id',
+        ]);
+        if ($validator->fails()) {
+            return error($validator->errors());
+        }
+        $find_file = Files::where('project_id', $request->projectid)->where('type', 'Import')->first();
+        if (!empty($find_file)) {
+            if ($find_file->import_status == 1) {
+                //Import Done
+                $sheet_columns = ImportColumns::where('project_id', $request->projectid)->get();
+                if ($sheet_columns->count()) {
+                    return success($sheet_columns);
+                } else {
+                    $find_row = ImportData::where('file_id', $find_file->id)->first();
+                    $find_cols = ImportColumns::where('file_id', $find_file->id)->first();
+                    if (!empty($find_cols) && empty($find_row)) {
+
+                        Schema::disableForeignKeyConstraints();
+                        ImportColumns::where('project_id', $request->projectid)->delete();
+                        Project::where('id', $request->projectid)->delete();
+                        Files::where('project_id', $request->projectid)->delete();
+                        ImportData::where('file_id', $find_file->id)->delete();
+                        Schema::enableForeignKeyConstraints();
+
+                        return error(Lang::get('validation.custom.empty_excel_file'), "Failed");
+                    }
+                    if (!empty($find_row)) {
+                        if (!empty($find_cols)) {
+                            $is_data_existt = ImportColumns::where('file_id', $find_file->id)->where('project_id', $request->projectid)->first();
+                            if (empty($is_data_existt)) {
+                                $update_columns = ImportColumns::where('file_id', $find_file->id)->update(['project_id' => $request->projectid]);
+                            }
+                        } else {
+                            $get_row = $find_row->toArray();
+                            if (empty($get_row['row_details'])) {
+                                Schema::disableForeignKeyConstraints();
+                                ImportColumns::where('project_id', $request->projectid)->delete();
+                                Project::where('id', $request->projectid)->delete();
+                                Files::where('project_id', $request->projectid)->delete();
+                                ImportData::where('file_id', $find_file->id)->delete();
+                                Schema::enableForeignKeyConstraints();
+                                return error(Lang::get('validation.custom.empty_excel_headers'), "Failed");
+                            }
+                            // return $get_row;
+                            $sheet_headers = array_filter(array_keys((array)$get_row['row_details']));
+                            $sheet_headers = array_map(function ($value) {
+                                return str_replace(' ', '_', $value);
+                            }, $sheet_headers);
+                            $required_cols = array('Account_Reference', 'Current_Balance', 'Delinquency_Flag');
+                            $search_array = array_map('strtolower', $sheet_headers);
+                            foreach ($required_cols as $recol) {
+                                if (!in_array(strtolower($recol), $search_array)) {
+
+                                    Schema::disableForeignKeyConstraints();
+                                    ImportColumns::where('project_id', $request->projectid)->delete();
+                                    Project::where('id', $request->projectid)->delete();
+                                    Files::where('project_id', $request->projectid)->delete();
+                                    ImportData::where('file_id', $find_file->id)->delete();
+                                    Schema::enableForeignKeyConstraints();
+
+                                    return error(Lang::get('validation.custom.file_import_failed_reqcols'), "Failed");
+                                }
+                            }
+                            $add_all = array();
+                            $current_time = currenthumantime();
+                            foreach ($sheet_headers as $single_head) {
+                                $add_all[] = ['file_id' => $find_file->id, 'project_id' => $request->projectid, 'column_heading' => $single_head, 'created_at' => $current_time, 'updated_at' => $current_time];
+                            }
+                            if (!empty($add_all)) {
+                                $add_many = ImportColumns::insert($add_all);
+                            }
+                        }
+
+                        $is_data_exist = ImportData::where('file_id', $find_file->id)->where('project_id', $request->projectid)->first();
+                        if (empty($is_data_exist)) {
+                            $update_rows = ImportData::where('file_id', $find_file->id)->update(['project_id' => $request->projectid]);
+                        }
+                        $sheet_columns = ImportColumns::where('project_id', $request->projectid)->get();
+                        if ($sheet_columns->count()) {
+                            return success($sheet_columns);
+                        } else {
+                            return error(Lang::get('validation.custom.invalid_projectid'));
+                        }
+                    }
+                }
+            } elseif ($find_file->import_status == 2) {
+                //Pending
+                $extra_data = array('percentage' => 0.00);
+                if ($find_file->total_rows > 0) {
+                    $get_imported = ImportData::where('file_id', $find_file->id)->get();
+                    $total_imported = $get_imported->count();
+                    if ($total_imported > 0) {
+                        $totalrows = $find_file->total_rows;
+                        $percent = $total_imported / $totalrows;
+                        $imported_percent = number_format($percent * 100, 2);
+                        $extra_data = array('percentage' => $imported_percent);
+                        if ($total_imported >= $totalrows) {
+                            $find_file->import_status = 1;
+                            $find_file->import_end_time = time();
+                            $find_file->save();
+                            $extra_data = array('percentage' => 99.99);
+                        }
+                        return error(Lang::get('validation.custom.file_import_pending'), "Pending", $extra_data);
+                    } else {
+                        return error(Lang::get('validation.custom.file_import_pending'), "Pending", $extra_data);
+                    }
+                } else {
+                    return error(Lang::get('validation.custom.file_import_pending'), "Pending", $extra_data);
+                }
+            } else {
+                //Falied
+                Schema::disableForeignKeyConstraints();
+                ImportColumns::where('project_id', $request->projectid)->delete();
+                Project::where('id', $request->projectid)->delete();
+                Files::where('project_id', $request->projectid)->delete();
+                ImportData::where('file_id', $find_file->id)->delete();
+                Schema::enableForeignKeyConstraints();
+
+                return error(Lang::get('validation.custom.file_import_failed'), "Failed");
+            }
+        } else {
+            return error(Lang::get('validation.custom.invalid_projectid'));
+        }
+    }
+
+    //update status for Include/Exclude of columns
+    public function managesheetheaders(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'projectid' => 'required|numeric|exists:App\Models\Project,id',
+            'headerids' => 'required|array',
+        ]);
+        if ($validator->fails()) {
+            return error($validator->errors());
+        }
+        $colids = $request->headerids;
+        $colids = array_map('intval', $colids);
+        $update_data = ImportColumns::where('project_id', $request->projectid)->update(['status' => 1]);
+        $update_data = ImportColumns::where('project_id', $request->projectid)->whereNotIn('id', $colids)->update(['status' => 0]);
+        $find_data = Project::find($request->projectid);
+        if ($find_data->last_completed_step == 2) {
+            $find_data->last_completed_step = 3;
+            $find_data->save();
+        }
+        $check_user = $request->get('current_user');
+
+        //import sheet data when user edits columns,after project create completed-Removed in new logic
+        // if ($find_data->last_completed_step == 5) {
+        //     $import_data = $this->importsheetdata($request->projectid);
+        //     if ($import_data != 1) {
+        //         addlog('Edit', 'Project', Lang::get('validation.logs.projectdataimport_failed', ['projectname' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+        //         return $import_data;
+        //     } else {
+        //         addlog('Edit', 'Project', Lang::get('validation.logs.projectdataimport_success', ['projectname' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+        //     }
+        // }
+        //End - import sheet data when user edits columns,after project create completed
+        if ($find_data->last_completed_step == 5) {
+            addlog('Edit', 'Project', Lang::get('validation.logs.projectdata_success', ['projectname' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+        } else {
+            addlog('Add', 'Project', Lang::get('validation.logs.projectdata_success', ['projectname' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+        }
+        $activecolumns = ImportColumns::where('project_id', $request->projectid)->where('status', 1)->get();
+        return success($activecolumns, Lang::get('validation.custom.project_column_success'));
+        // } else {
+        //     return error();
+        // }
+    }
+
+
+    //Add Template and assign questions
+    public function addtemplatequestions(Request $request)
+    {
+        $validate_array = array(
+            'templateid' => 'sometimes|required|numeric|min:1|exists:App\Models\Templates,id',
+            'projectid' => 'required|numeric|exists:App\Models\Project,id',
+            'template_name' => 'required|max:255',
+            'questionids' => 'required|array',
+        );
+        $validator = Validator::make($request->all(), $validate_array);
+        if ($validator->fails()) {
+            return error($validator->errors());
+        }
+        if ($request->has('templateid') && trim($request->templateid) != '')
+            $is_exist = Templates::where('name', $request->template_name)->where('id', '!=', $request->templateid)->first();
+        else
+            $is_exist = Templates::where('name', $request->template_name)->first();
+        if (empty($is_exist)) {
+            $check_user = $request->get('current_user');
+            if ($request->has('templateid') && trim($request->templateid) != '') {
+                $cur_template = Templates::find($request->templateid);
+                $cur_template->name = $request->template_name;
+                $cur_template->save();
+            } else {
+                $add_data = Templates::create(['name' => $request->template_name, 'status' => 1, 'created_by' => $check_user->id]);
+                if ($add_data) {
+                    addlog('Add', 'Template', Lang::get('validation.logs.templateadd_success', ['template' => $request->template_name, 'username' => $check_user->username]), $check_user->id);
+                } else {
+                    addlog('Add', 'Template', Lang::get('validation.logs.templateadd_failed', ['template' => $request->template_name, 'username' => $check_user->username]), $check_user->id);
+                    return error(Lang::get('validation.custom.template_add_failed'));
+                }
+                $cur_template = Templates::find($add_data->id);
+            }
+            if (!empty($cur_template)) {
+                $add_all = array();
+                $current_time = currenthumantime();
+                $cur_project = Project::find($request->projectid);
+                $cur_project->template_id = $cur_template->id;
+                if ($cur_project->last_completed_step == 3) {
+                    $cur_project->last_completed_step = 4;
+                }
+                $cur_project->save();
+                $add_all = array();
+                $current_time = currenthumantime();
+                foreach ($request->questionids as $qid) {
+                    if (is_numeric($qid)) {
+                        $cur_question = Questions::find($qid);
+                        if (!empty($cur_question) && ($cur_question->template_id != $cur_template->id)) {
+                            $is_exist = Questions::where('question', '=', $cur_question->question)->where('template_id', $cur_template->id)->first();
+                            if (empty($is_exist)) {
+                                $add_all[] = array(
+                                    'category' => $cur_question->category,
+                                    'export_heading' => $cur_question->export_heading,
+                                    'comment_required' => $cur_question->comment_required,
+                                    'question' => $cur_question->question,
+                                    'choices' => json_encode($cur_question->choices),
+                                    'status' => 1,
+                                    'template_id' => $cur_template->id,
+                                    'created_by' => $check_user->id,
+                                    'created_at' => $current_time,
+                                    'updated_at' => $current_time,
+                                );
+                            }
+                        }
+                    }
+                }
+                if (!empty($add_all)) {
+                    $add_many = Questions::insert($add_all);
+                }
+                // $cur_template = Templates::find($cur_template->id);
+                addlog('Edit', 'Project', Lang::get('validation.logs.projectquestionassign_success', ['templatename' => $cur_template->name, 'projectname' => $cur_project->project_name, 'username' => $check_user->username]), $check_user->id);
+                return success($cur_template, Lang::get('validation.custom.template_question_assigned'));
+            } else {
+                return error(Lang::get('validation.custom.invalid_templateid'));
+            }
+        } else {
+            if ($is_exist->status == 0)
+                return error(Lang::get('validation.custom.template_already_deleted'));
+            else
+                return error(Lang::get('validation.custom.template_already_exist'));
+        }
+    }
+
+
+    // Assign users to project
+    public function assignusers(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'projectid' => 'required|numeric|min:1|exists:App\Models\Project,id',
+            'userids' => 'required|array',
+        ]);
+        if ($validator->fails()) {
+            return error($validator->errors());
+        }
+        $find_data = Project::find($request->projectid);
+        $check_user = $request->get('current_user');
+        $already_assigned = $find_data->relatedUsers->pluck('user_id')->toArray();
+        $userids = array_unique($request->userids);
+        $add_all = array();
+        $current_time = currenthumantime();
+        foreach ($userids as $uid) {
+            if (is_numeric($uid)) {
+                $find_user = User::find($uid);
+                if (!empty($find_user) && !in_array($uid, $already_assigned)) {
+                    $add_all[] = ['project_id' => $find_data->id, 'user_id' => $find_user->id, 'created_at' => $current_time, 'updated_at' => $current_time];
+                }
+            }
+        }
+        foreach ($already_assigned as $sid) {
+            if (!in_array($sid, $userids)) {
+                ProjectsUsers::where('project_id', $find_data->id)->where('user_id', $sid)->delete();
+            }
+        }
+        if (!empty($add_all)) {
+            $add_many = ProjectsUsers::insert($add_all);
+        }
+
+        //import sheet data only after users are assigned when project is created for first time-Removed in new logic
+        // if ($find_data->last_completed_step != 5) {
+        //     $find_data->last_completed_step = 5;
+        //     $find_data->status = 1;
+        //     $import_data = $this->importsheetdata($request->projectid);
+        //     if ($import_data != 1) {
+        //         addlog('Edit', 'Project', Lang::get('validation.logs.projectdataimport_failed', ['projectname' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+        //         return $import_data;
+        //     } else {
+        //         addlog('Edit', 'Project', Lang::get('validation.logs.projectdataimport_success', ['projectname' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+        //     }
+        // }
+        //End - import sheet data only after users are assigned when project is created for first time
+        if ($find_data->last_completed_step != 5) {
+            $find_data->last_completed_step = 5;
+            $find_data->status = 1;
+        }
+        if ($find_data->save()) {
+            addlog('Edit', 'Project', Lang::get('validation.logs.projectuserassigned_success', ['projectname' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+            return success($find_data, Lang::get('validation.custom.project_users_assigned_success'));
+        } else {
+            addlog('Add', 'Project', Lang::get('validation.logs.projectuserassigned_failed', ['projectname' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+            return success($find_data, Lang::get('validation.custom.project_users_assigned_failed'));
+        }
+    }
+
+    //import all data from file based on file- Common function,not for direct url access-Removed in new logic
+    public function importsheetdata($projectid)
+    // public function importsheetdata(Request $request)
+    {
+        // $projectid = $request->projectid;
+        $find_file = Files::where('project_id', $projectid)->where('type', 'Import')->first();
+        if (empty($find_file)) {
+            return error(Lang::get('validation.custom.file_not_found'));
+        } else {
+            $sheet_headers = array();
+            $all_columns = ImportColumns::where('file_id', $find_file->id)->get()->toArray();
+            $filedirpath = public_path() . env('IMPORT_FILESPATH') . $find_file->filename;
+            $start_time = time();
+
+            // if (!empty($collection)) {
+            // $rows = Excel::toArray(new ProjectImport, $filedirpath);
+            $final_data = array();
+            // if (!empty($all_columns) && !empty($sheet_headers)) {
+            if (!empty($all_columns)) {
+                $col_ids = array_column($all_columns, 'id');
+                $col_status_array = array_combine($col_ids, array_column($all_columns, 'status'));
+                $only_activecols = array_keys(array_filter($col_status_array));
+                $collection = (new FastExcel)->import($filedirpath);
+                $sheet_data = $collection;
+                foreach ($sheet_data as $single_row) {
+                    $temp_row = array();
+                    foreach ($single_row as $srow) {
+                        if (is_a($srow, 'DateTime'))
+                            $srow = $srow->format('Y-m-d H:i:s');
+                        $temp_row[] = $srow;
+                    }
+                    $final_data[] = array_combine($col_ids, $temp_row);
+                }
+                if (!empty($final_data)) {
+                    // unset($final_data[0]);
+                    ImportData::where('project_id', $projectid)->delete();
+                    $add_all = array();
+                    $current_time = currenthumantime();
+                    foreach ($final_data as $sdata) {
+                        foreach ($sdata as $colid => $colvalue) {
+                            if (!in_array($colid, $only_activecols))
+                                unset($sdata[$colid]);
+                        }
+                        $add_all[] = ['project_id' => $projectid, 'row_details' => json_encode($sdata), 'created_at' => $current_time, 'updated_at' => $current_time];
+                    }
+                    if (!empty($add_all)) {
+                        $small_arr = array_chunk($add_all, 20000);
+                        foreach ($small_arr as $sarr) {
+                            $add_many = ImportData::insert($sarr);
+                        }
+                        $end_time = time();
+                        $totalSecondsDiff = abs($start_time - $end_time);
+                        Project::where('id', $projectid)->update(['import_time_taken' => $totalSecondsDiff]);
+                        if ($add_many)
+                            return 1;
+                    }
+                } else {
+                    return error(Lang::get('validation.custom.empty_excel_file'));
+                }
+            } else {
+                return error(Lang::get('validation.custom.empty_excel_file'));
+            }
+        }
+    }
+
+
+    // Get all projects
+    public function allprojects(Request $request)
+    {
+        $check_user = $request->get('current_user');
+        $getdata = Project::query();
+
+        if ($check_user->role == 2) {
+            //For standard users
+            $find_projectusers = ProjectsUsers::where('user_id', $check_user->id)->get();
+            if ($find_projectusers->count()) {
+                $project_ids = $find_projectusers->pluck('project_id')->toArray();
+                foreach ($project_ids as $key => $pi) {
+                    $find_file = Files::where('project_id', $pi)->where('type', 'Import')->first();
+                    if (empty($find_file) || $find_file->import_status != 1) {
+                        unset($project_ids[$key]);
+                    }
+                }
+                $getdata = $getdata->where('status', 1);
+                $getdata = $getdata->whereIn('id', $project_ids);
+            }
+        } else {
+            // For admin users
+            if ($request->has('status'))
+                $getdata = $getdata->where('status', $request->status);
+            else
+                $getdata = $getdata->where('status', '!=', 0);
+            if ($request->has('userid') && $request->userid != '')
+                $getdata = $getdata->where('created_by', $request->userid);
+        }
+
+        $all_data = $getdata->get();
+        if (!empty($all_data)) {
+            foreach ($all_data as $sdata) {
+                $find_data = Files::where('project_id', $sdata->id)->where('type', 'Import')->first();
+                if (!empty($find_data))
+                    $sdata->import_status = $find_data->import_status;
+                else
+                    $sdata->import_status = 0;
+                $find_data = User::find($sdata->created_by);
+                if (!empty($find_data))
+                    $sdata->created_user = $find_data->firstname . ' ' . $find_data->lastname;
+                else
+                    $sdata->created_user = '';
+            }
+        }
+        return ($all_data) ? success($all_data) : error();
+    }
+
+    // Get single project details
+    public function viewproject(Request $request, $projectid)
+    {
+        $find_data = Project::find($projectid);
+        if (!empty($find_data)) {
+            $final_details = $find_data;
+            $all_questions = array();
+            if (!empty($find_data->relatedQuestions)) {
+                $final_details->relatedquestions = $find_data->relatedQuestions;
+            } else {
+                $final_details->relatedquestions = [];
+            }
+            $assigned_users = $find_data->relatedUsers->pluck('user_id')->toArray();
+            if (!empty($assigned_users)) {
+                $as_users = User::whereIn('id', $assigned_users)->get();
+                $as_users->makeHidden(['authtoken']);
+                $final_details->assignedusers = $as_users;
+            } else {
+                $final_details->assignedusers = [];
+            }
+            $final_details->templatedetails = $find_data->templatedetails;
+            $final_details->projectfile = $find_data->projectfile;
+            $all_filecols = $find_data->relatedFileColumns;
+            $activeheaders = array();
+            if (!empty($all_filecols)) {
+                foreach ($all_filecols as $scol) {
+                    if ($scol->status == 1) {
+                        $activeheaders[] = $scol->id;
+                    }
+                }
+            }
+            $final_details->activeheaderids = $activeheaders;
+            $final_details->investordetails = $find_data->investordetails;
+            $final_details->platformdetails = $find_data->platformdetails;
+            $final_details->investordetails = Investor::find($find_data->investor_id);
+            $final_details->platformdetails = Platform::find($find_data->platform_id);
+
+            unset($final_details->relatedUsers);
+            unset($final_details->relatedQuestions);
+            unset($final_details->relatedFileColumns);
+            return success($final_details);
+        } else {
+            return error(Lang::get('validation.custom.invalid_projectid'));
+        }
+    }
+
+    // Delete Project- Change Project status to 0
+    public function deleteproject(Request $request, $projectid)
+    {
+        $check_user = $request->get('current_user');
+        $find_data = Project::find($projectid);
+        if (!empty($find_data)) {
+            $find_data->status = 0;
+            if ($find_data->save()) {
+                addlog('Delete', 'Project', Lang::get('validation.logs.projectdelete_success', ['name' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+                return success([], Lang::get('validation.custom.project_delete_success'));
+            } else {
+                addlog('Delete', 'Project', Lang::get('validation.logs.projectdelete_failed', ['name' => $find_data->project_name, 'username' => $check_user->username]), $check_user->id);
+                return error(Lang::get('validation.custom.project_delete_failed'));
+            }
+        } else {
+            return error(Lang::get('validation.custom.invalid_projectid'));
+        }
+    }
+
+    // Get import progress
+    public function importprogress(Request $request)
+    {
+
+        $validator = Validator::make($request->all(), [
+            'projectid' => 'required|numeric|min:1|exists:App\Models\Project,id',
+        ]);
+        if ($validator->fails()) {
+            return error($validator->errors());
+        }
+        $find_file = Files::where('project_id', $request->projectid)->where('type', 'Import')->first();
+        if (!empty($find_file)) {
+            if ($find_file->import_status == 1) {
+                //Import Done
+                $update_rows = ImportData::where('file_id', $find_file->id)->update(['project_id' => $request->projectid]);
+                $find_row = ImportData::where('file_id', $find_file->id)->first();
+                $find_cols = ImportColumns::where('file_id', $find_file->id)->first();
+                if (!empty($find_cols) && empty($find_row)) {
+
+                    Schema::disableForeignKeyConstraints();
+                    ImportColumns::where('project_id', $request->projectid)->delete();
+                    Project::where('id', $request->projectid)->delete();
+                    Files::where('project_id', $request->projectid)->delete();
+                    ImportData::where('file_id', $find_file->id)->delete();
+                    Schema::enableForeignKeyConstraints();
+
+                    return error(Lang::get('validation.custom.empty_excel_file'), "Failed");
+                }
+                if (!empty($find_row)) {
+                    if (!empty($find_cols)) {
+                        $update_columns = ImportColumns::where('file_id', $find_file->id)->update(['project_id' => $request->projectid]);
+                    } else {
+                        $get_row = $find_row->toArray();
+                        $sheet_headers = array_filter(array_keys((array)$get_row['row_details']));
+                        $sheet_headers = array_map(function ($value) {
+                            return str_replace(' ', '_', $value);
+                        }, $sheet_headers);
+                        $required_cols = array('Account_Reference', 'Current_Balance', 'Delinquency_Flag');
+                        $search_array = array_map('strtolower', $sheet_headers);
+                        foreach ($required_cols as $recol) {
+                            if (!in_array(strtolower($recol), $search_array)) {
+
+                                Schema::disableForeignKeyConstraints();
+                                ImportColumns::where('project_id', $request->projectid)->delete();
+                                Project::where('id', $request->projectid)->delete();
+                                Files::where('project_id', $request->projectid)->delete();
+                                ImportData::where('file_id', $find_file->id)->delete();
+                                Schema::enableForeignKeyConstraints();
+
+                                return error(Lang::get('validation.custom.file_import_failed_reqcols'), "Failed");
+                            }
+                        }
+                        $add_all = array();
+                        $current_time = currenthumantime();
+                        foreach ($sheet_headers as $single_head) {
+                            $add_all[] = ['file_id' => $find_file->id, 'project_id' => $request->projectid, 'column_heading' => $single_head, 'created_at' => $current_time, 'updated_at' => $current_time];
+                        }
+                        if (!empty($add_all)) {
+                            $add_many = ImportColumns::insert($add_all);
+                        }
+                    }
+
+                    $sheet_columns = ImportColumns::where('project_id', $request->projectid)->get();
+                    if (!empty($sheet_columns)) {
+                        return success($sheet_columns, 'success', "Success");
+                    } else {
+                        return error(Lang::get('validation.custom.invalid_projectid'));
+                    }
+                }
+            } elseif ($find_file->import_status == 2) {
+                //Pending
+                $final_data = array('percentage' => 0.00);
+                if ($find_file->total_rows > 0) {
+                    // $get_imported = ImportData::where('file_id', $find_file->id)->get();
+                    // $total_imported = $get_imported->count();
+                    $total_imported = ImportData::where('file_id', $find_file->id)->count();
+                    if ($total_imported > 0) {
+                        $totalrows = $find_file->total_rows;
+                        $percent = $total_imported / $totalrows;
+                        $imported_percent = number_format($percent * 100, 2);
+                        $final_data = array('percentage' => $imported_percent);
+                        if ($total_imported >= $totalrows) {
+                            $find_file->import_status = 1;
+                            $find_file->import_end_time = time();
+                            $find_file->save();
+                            $final_data = array('percentage' => 99.99);
+                        }
+                    }
+                }
+                return success($final_data, 'success', "Pending");
+            } else {
+                //Falied
+                return error(Lang::get('validation.custom.file_import_failed'), "Failed");
+            }
+        } else {
+            return error(Lang::get('validation.custom.invalid_projectid'));
+        }
+    }
+}

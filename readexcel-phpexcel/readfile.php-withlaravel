@@ -1,0 +1,208 @@
+<?php
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+
+//Load laravel
+require '../vendor/autoload.php';
+$root_path = $_SERVER['DOCUMENT_ROOT'];
+$envpath = rtrim($root_path, '/www');
+$dotenv = Dotenv\Dotenv::createImmutable($envpath);
+$dotenv->load();
+
+$conn = new mysqli(env('DB_HOST'), env('DB_USERNAME'), env('DB_PASSWORD'), env('DB_DATABASE'));
+
+// Check connection
+if ($conn->connect_errno) {
+    echo "Failed to connect to MySQL: " . $conn->connect_error;
+    exit();
+} else {
+    // echo "connected";
+}
+
+
+
+require 'vendor/autoload.php';
+
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+
+/**  Define a Read Filter class implementing \PhpOffice\PhpSpreadsheet\Reader\IReadFilter  */
+class ChunkReadFilter implements \PhpOffice\PhpSpreadsheet\Reader\IReadFilter
+{
+    private $startRow = 0;
+    private $endRow   = 0;
+
+    /**  Set the list of rows that we want to read  */
+    public function setRows($startRow, $chunkSize)
+    {
+        $this->startRow = $startRow;
+        $this->endRow   = $startRow + $chunkSize;
+    }
+
+    public function readCell($columnAddress, $row, $worksheetName = '')
+    {
+        //  Only read the heading row, and the configured rows
+        if (($row == 1) || ($row >= $this->startRow && $row < $this->endRow)) {
+            return true;
+        }
+        return false;
+    }
+}
+
+
+// $excelfile_folder = $_SERVER['DOCUMENT_ROOT'].'/api/public' . env('PROJECT_EXCEL_FILESPATH');
+$excelfile_folder = '/Websites/www/html/stagingqflow.quadringroup.com/www/api/readexcel/';
+// $filename = 'small_excel.xlsx';
+$filename = 'large_excel.xlsx';
+$file_id = 11;
+$file_path = $excelfile_folder . $filename;
+$columg_dbtable = 'import_columns_phpexcel';
+$data_dbtable = 'import_data_phpexcel';
+$return_data = array();
+
+$header_value = array();
+$sql = "SELECT * FROM $columg_dbtable WHERE `file_id`=$file_id";
+$result = $conn->query($sql);
+if ($result->num_rows > 0) {
+    while ($sqlrow = $result->fetch_assoc()) {
+        $header_value[] = $sqlrow['column_heading'];
+    }
+}
+
+
+
+
+
+$filetype = 'Xlsx';
+$reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReader($filetype);
+$woksheetdata = $reader->listWorksheetInfo($file_path);
+if (empty($woksheetdata)) {
+    $return_data['status'] = 0;
+    $return_data['message'] = 'Unable to sheet details';
+    $return_data['error'] = 'Error';
+} else {
+    $total_rows = $woksheetdata[0]['totalRows'];
+
+    $chunkSize = 300;
+    $chunkFilter = new ChunkReadFilter();
+    $reader->setReadFilter($chunkFilter);
+
+
+
+
+    $final_values = array();
+    // for ($startRow = 2; $startRow <= $total_rows; $startRow += $chunkSize) {
+    for ($startRow = 2; $startRow <= 1000; $startRow += $chunkSize) {
+        $sql_datavalues = '';
+        $has_rows = 0;
+
+        $current_time = currenthumantime();
+        $chunkFilter->setRows($startRow, $chunkSize);
+        $spreadsheet = $reader->load($file_path);
+        $worksheet = $spreadsheet->getActiveSheet();
+
+        $column_limit = $worksheet->getHighestDataColumn();
+        $column_chars = array();
+        $letter = 'A';
+        while ($letter !== $column_limit) {
+            $column_chars[] = $letter++;
+        }
+        if (empty($header_value)) {
+            $sql_values = '';
+            foreach ($column_chars as $char) {
+                $svalue = str_replace(' ', '_', $worksheet->getCell($char . '1')->getValue());
+                $sql_values .= '(' . $file_id . ',NULL,"' . $conn->real_escape_string($svalue) . '",1,"' . $current_time . '","' . $current_time . '"),';
+                $header_value[] =  $svalue;
+            }
+
+            if (!empty($header_value)) {
+                $sql_values = rtrim($sql_values, ',') . ';';
+                $sql = "INSERT INTO $columg_dbtable (`file_id`, `project_id`, `column_heading`,`status`,`created_at`,`updated_at`) VALUES $sql_values";
+                if ($conn->multi_query($sql) === TRUE) {
+                    // echo "New records created successfully";
+                } else {
+                    $return_data['status'] = 0;
+                    $return_data['message'] = 'Unable to insert header columns';
+                    $return_data['error'] = 'Error: ' . $sql . '<br>' . $conn->error;
+                }
+            }
+        }
+
+        if (empty($header_value)) {
+            $return_data['status'] = 0;
+            $return_data['message'] = 'Empty header columns ';
+            $return_data['error'] = 'Error';
+        }
+        // print_r($header_value);
+        // print_r($return_data);
+        if (empty($return_data)) {
+            $highestRow = $startRow + $chunkSize;
+            for ($row = $startRow; $row <= $highestRow; ++$row) {
+                $row_value = array();
+                $is_empty = 1;
+                foreach ($column_chars as $char) {
+                    $svalue = $worksheet->getCell($char . $row)->getValue();
+                    $row_value[] = $svalue;
+                    if (trim($svalue) != '')
+                        $is_empty = 0;
+                }
+                if ($is_empty == 0) {
+                    $data_json = $conn->real_escape_string(json_encode(array_combine($header_value, $row_value)));
+                    $sql_datavalues .= '(' . $file_id . ',NULL,"' . $data_json . '",0,"' . $current_time . '","' . $current_time . '"),';
+                    $has_rows = 1;
+                    // $final_values[] = array_combine($header_value, $row_value);
+                }
+            }
+        }
+        // echo $sql_datavalues;
+        // exit;
+        if ($has_rows == 1) {
+            $sql_datavalues = rtrim($sql_datavalues, ',') . ';';
+            $sql = "INSERT INTO $data_dbtable (`file_id`, `project_id`, `row_details`,`task_status`,`created_at`,`updated_at`) VALUES $sql_datavalues";
+            if ($conn->multi_query($sql) === TRUE) {
+                // echo "New records created successfully";
+            } else {
+                $return_data['status'] = 0;
+                $return_data['message'] = 'Unable to insert excel data';
+                $return_data['error'] = 'Error: ' . $sql . '<br>' . $conn->error;
+            }
+        } else {
+            $return_data['status'] = 0;
+            $return_data['message'] = 'Empty excel sheet';
+            $return_data['error'] = 'Error';
+        }
+    }
+
+    $conn->close();
+    // print_r($final_values);
+    // print_r($return_data);
+    echo "Done";
+}
+$sql_datavalues = '';
+print_r($return_data);
+exit;
+
+
+// $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReader('Xlsx');
+// $reader->setReadDataOnly(TRUE);
+// $spreadsheet = $reader->load("small_excel.xlsx");
+// $spreadsheet = $reader->load("large_excel.xlsx");
+
+// $worksheet = $spreadsheet->getActiveSheet();
+// // Get the highest row and column numbers referenced in the worksheet
+// $highestRow = $worksheet->getHighestRow(); // e.g. 10
+// $highestColumn = $worksheet->getHighestColumn(); // e.g 'F'
+// $highestColumnIndex = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($highestColumn); // e.g. 5
+
+// $highestRow = 50;
+// echo '<table>' . "\n";
+// for ($row = 1; $row <= $highestRow; ++$row) {
+//     echo '<tr>' . PHP_EOL;
+//     for ($col = 1; $col <= $highestColumnIndex; ++$col) {
+//         $value = $worksheet->getCellByColumnAndRow($col, $row)->getValue();
+//         echo '<td>' . $value . '</td>' . PHP_EOL;
+//     }
+//     echo '</tr>' . PHP_EOL;
+// }
+// echo '</table>' . PHP_EOL;
+// echo "DONE";
